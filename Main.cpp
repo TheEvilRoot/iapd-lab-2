@@ -8,6 +8,9 @@
 #include <algorithm>
 
 #include <Windows.h>
+#include <ntddscsi.h>
+
+#include "Utils.hpp"
 
 #define openDrive(path) CreateFileA(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr)
 
@@ -18,42 +21,27 @@ std::array<std::string, 16> busTypes{
   "SD", "MMC", "Vitrual", "File backed virtual"
 };
 
-std::array<std::string, 5> sizeSuffixes{
-  "B", "Kb", "Mb", "Gb", "Tb"
-};
-
-struct SizeValue {
-private:
-  ULONGLONG _bytes;
-  ULONGLONG _value{ 0 };
-  std::string _suffix{ };
-
-  size_t applySuffix() {
-    for (auto sIdx = 0; sIdx < sizeSuffixes.size(); sIdx++) {
-      if (_value < 1024) {
-        return sIdx;
-      }
-      _value /= 1024;
-    }
-    return sizeSuffixes.size() - 1;
-  }
-public:
-  explicit SizeValue(ULONGLONG v) :
-    _bytes{ v }, _value{ v }, _suffix{ sizeSuffixes[applySuffix()] } { }
-
-  auto bytes() const { return _bytes; }
-  auto value() const { return _value; }
-  auto suffix() const { return _suffix; }
-
-};
-
 struct DeviceInfo {
-  std::string vendor;
-  std::string model;
-  std::string firmware_version;
-  std::string bus_type;
-  std::string serial_number;
+  std::string vendor{"N/A"};
+  std::string model{"N/A"};
+  std::string firmware_version{"N/A"};
+  std::string bus_type{"N/A"};
+  std::string serial_number{"N/A"};
 
+  friend std::ostream& operator<<(std::ostream& o, const DeviceInfo& i) {
+    std::cout << std::string(i.model.size(), '-') << "\n";
+    std::cout << i.model << "\n";
+    std::cout << std::string(i.model.size(), '-') << "\n\n";
+
+
+    std::cout << std::setfill(' ') << std::right;
+    std::cout << std::setw(10) << "Vendor: " << i.vendor << "\n";
+    std::cout << std::setw(10) << "Model: " << i.model << "\n";
+    std::cout << std::setw(10) << "Firmware: " << i.firmware_version << "\n";
+    std::cout << std::setw(10) << "Bus type: " << i.bus_type << "\n";
+    std::cout << std::setw(10) << "Serial #: " << i.serial_number << "\n";
+    return o;
+  }
 };
 
 struct Volume {
@@ -63,30 +51,8 @@ struct Volume {
   SizeValue freeSpace{0};
   SizeValue busySpace{0};
   std::vector<std::string> errors { };
+  std::vector<std::string> ataSupport{ };
 };
-
-auto getErrorMessage(DWORD errorCode) {
-  if (errorCode == ERROR_SUCCESS) return std::string();
-  LPSTR messageBuffer{ nullptr };
-  auto size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-    NULL, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<LPSTR>(&messageBuffer), 0, NULL);
-  std::string message(messageBuffer, size);
-  for (auto i = 0; i < message.size(); i++)
-    if (message[i] == 0xa || message[i] == 0xd) message[i] = ' ';
-  LocalFree(messageBuffer);
-  return message;
-}
-
-auto trim(const std::string& str) {
-  auto first = str.find_first_not_of(' ');
-  if (first == std::string::npos) {
-    return str;
-  }
-  auto last = str.find_last_not_of(' ');
-  return str.substr(first, (last - first + 1));
-}
-
-
 
 auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
   STORAGE_DESCRIPTOR_HEADER header;
@@ -105,9 +71,9 @@ auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
   const STORAGE_DEVICE_DESCRIPTOR* descriptor = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(buffer.get());
   DeviceInfo info;
   if (descriptor->VendorIdOffset != 0)
-    info.vendor = std::string(buffer.get() + descriptor->VendorIdOffset);
+    info.vendor = trim(std::string(buffer.get() + descriptor->VendorIdOffset));
   if (descriptor->ProductIdOffset != 0)
-    info.model = std::string(buffer.get() + descriptor->ProductIdOffset);
+    info.model = trim(std::string(buffer.get() + descriptor->ProductIdOffset));
   if (descriptor->ProductRevisionOffset != 0)
     info.firmware_version = std::string(buffer.get() + descriptor->ProductRevisionOffset);
   if (descriptor->SerialNumberOffset != 0)
@@ -115,7 +81,41 @@ auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
   if (descriptor->BusType > 0 && descriptor->BusType < busTypes.size())
     info.bus_type = busTypes[descriptor->BusType];
   else info.bus_type = "(" + std::to_string(descriptor->BusType) + ")";
-  return info;
+
+  auto identitySize = 512;
+  auto identityBuffer = std::make_unique<unsigned char[]>(identitySize + sizeof(ATA_PASS_THROUGH_EX));
+  auto ataPass = reinterpret_cast<ATA_PASS_THROUGH_EX*>(identityBuffer.get());
+  ataPass->Length = sizeof(ataPass);
+  ataPass->TimeOutValue = 10;
+  ataPass->DataTransferLength = identitySize;
+  ataPass->DataBufferOffset = sizeof(ATA_PASS_THROUGH_EX);
+
+  auto ideRegs = reinterpret_cast<IDEREGS*>(ataPass->CurrentTaskFile);
+  ideRegs->bCommandReg = 0xec;
+  ideRegs->bSectorCountReg = 1;
+
+  ataPass->AtaFlags = ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED;
+
+  if (!DeviceIoControl(driveHandle, IOCTL_ATA_PASS_THROUGH, ataPass, identitySize + sizeof(ATA_PASS_THROUGH_EX), ataPass, identitySize + sizeof(ATA_PASS_THROUGH_EX), nullptr, nullptr)) {
+    std::cerr << "acquireDeviceInfo: DeviceIoControl IOCTL_ATA_PASS_THROUGH (" << info.model << ") :: " << GetLastError() << "\n";
+    return std::optional<DeviceInfo>();
+  }
+  
+  auto* data = reinterpret_cast<WORD*>(identityBuffer.get() + sizeof(ATA_PASS_THROUGH_EX));
+  uint16_t ataSupport = data[80];
+
+  struct {
+    uint8_t : 7;
+    uint8_t ata8_acs : 1;
+    uint8_t ata_atapi_7 : 1;
+    uint8_t ata_atapi_6 : 1;
+    uint8_t ata_atapi_5 : 1;
+    uint8_t ata_atapi_4 : 1;
+    uint8_t : 4;
+  } ataMask;
+  std::memcpy(&ataMask, &ataSupport, 2);
+  _asm nop;
+  return std::optional(info);
 }
 
 auto indexVolumes(STORAGE_PROPERTY_QUERY& query) {
@@ -151,7 +151,7 @@ auto indexVolumes(STORAGE_PROPERTY_QUERY& query) {
         continue;
       }
 
-      const _STORAGE_DEVICE_NUMBER* deviceNumber = reinterpret_cast<_STORAGE_DEVICE_NUMBER*>(buffer.get());
+      const auto* deviceNumber = reinterpret_cast<_STORAGE_DEVICE_NUMBER*>(buffer.get());
       vol.deviceNumber = deviceNumber->DeviceNumber;
       index.push_back(vol);
     }
@@ -167,41 +167,35 @@ int main() {
 
   auto volumeIndex = indexVolumes(query);
 
-  HANDLE driveHandle{ INVALID_HANDLE_VALUE };
   for (uint32_t index = 0; true; index++) {
     std::string drivePath = "\\\\.\\PhysicalDrive" + std::to_string(index);
-    if (driveHandle = openDrive(drivePath); driveHandle != INVALID_HANDLE_VALUE) {
-      if (auto info = acquireDeviceInfo(driveHandle, query); info) {
-        auto i = info.value();
-        std::cout << "Vendor: " << i.vendor << "\n";
-        std::cout << "Model: " << i.model << "\n";
-        std::cout << "Firmware: " << i.firmware_version << "\n";
-        std::cout << "Bus type: " << i.bus_type << "\n";
-        std::cout << "Serial number: " << i.serial_number << "\n";
+    if (auto driveHandle = openDrive(drivePath); driveHandle != INVALID_HANDLE_VALUE) {
+      if (auto result = acquireDeviceInfo(driveHandle, query); result) {
+        auto info = result.value();
+        std::cout << info << "\n";
 
-        std::cout << " Volumes: \n";
         for (const auto vol : volumeIndex) {
           if (vol.deviceNumber == index) {
-            std::cout << "  " << vol.letter << ":\n";
+            std::cout << "Volume " << vol.letter << ":\n";
+
             auto hasSize = vol.totalSpace.bytes() != 0;
             auto hasErrors = !vol.errors.empty();
+
             if (hasSize) {
-              std::cout << "   Total: " << vol.totalSpace.value() << vol.totalSpace.suffix() << "\n";
-              std::cout << "   Free:  " << vol.freeSpace.value() << vol.freeSpace.suffix() << "\n";
-              std::cout << "   Busy:  " << vol.busySpace.value() << vol.busySpace.suffix() << "\n";
-            }
-            if (hasSize && hasErrors)
-              std::cout << "   Errors: \n";
+              std::cout << "\t" << vol.busySpace << " / " << vol.totalSpace << " (" << vol.freeSpace << " free)\n";
+              if (hasErrors)
+                std::cout << "\tErrors: \n";
+            } 
             if (hasErrors) {
               for (const auto& error : vol.errors) {
-                std::cout << "    " << error << "\n";
+                std::cout << "\t" << error << "\n";
               }
             }
           }
         }
       }
     } else break;
-    std::cout << std::setw(20) << std::setfill('-') << "\n";
+    std::cout << "\n";
   }
-
+  getchar();
 }
