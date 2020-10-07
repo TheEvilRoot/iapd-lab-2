@@ -12,7 +12,7 @@
 
 #include "Utils.hpp"
 
-#define openDrive(path) CreateFileA(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr)
+#define openDrive(path) CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr)
 
 std::array<std::string, 16> busTypes{
   "Unknown", "SCSI", "ATAPI", "ATA",
@@ -28,6 +28,21 @@ struct DeviceInfo {
   std::string bus_type{"N/A"};
   std::string serial_number{"N/A"};
 
+  bool is_info_filled{ false };
+  bool dma_suport{ false };
+  bool pio_support[8];
+  struct {
+    uint8_t : 7;
+
+    uint8_t ata8_acs : 1;
+    uint8_t atapi_7 : 1;
+    uint8_t atapi_6 : 1;
+    uint8_t atapi_5 : 1;
+    uint8_t atapi_4 : 1;
+
+    uint8_t : 4;
+  } ata_data;
+
   friend std::ostream& operator<<(std::ostream& o, const DeviceInfo& i) {
     std::cout << std::string(i.model.size(), '-') << "\n";
     std::cout << i.model << "\n";
@@ -40,6 +55,30 @@ struct DeviceInfo {
     std::cout << std::setw(10) << "Firmware: " << i.firmware_version << "\n";
     std::cout << std::setw(10) << "Bus type: " << i.bus_type << "\n";
     std::cout << std::setw(10) << "Serial #: " << i.serial_number << "\n";
+
+    if (i.is_info_filled) {
+      std::cout << "\n";
+      std::cout << std::setw(10) << "DMA Support: " << stringifyBool(i.dma_suport) << "\n";
+      std::cout << std::setw(10) << "PIO Support: ";
+
+      if (!all_of<bool>(i.pio_support, 8, [](bool b) { return !b; })) {
+        for (auto k = 0; k < 8; k++) {
+          if (i.pio_support[k]) {
+            std::cout << (k > 0 ? std::string(13, ' ') : "") << "PIO Mode " << (k + 1) << "\n";
+          }
+        }
+      } else std::cout << "None\n";
+
+      std::cout << "ATA Standarts: \n";
+      std::cout << std::right;
+      std::cout << std::setw(14) << " ATA8-ACS: " << stringifyBool(i.ata_data.ata8_acs) << "\n";
+      std::cout << std::setw(14) << " ATA/ATAPI-7: " << stringifyBool(i.ata_data.atapi_7) << "\n";
+      std::cout << std::setw(14) << " ATA/ATAPI-6: " << stringifyBool(i.ata_data.atapi_6) << "\n";
+      std::cout << std::setw(14) << " ATA/ATAPI-5: " << stringifyBool(i.ata_data.atapi_5) << "\n";
+      std::cout << std::setw(14) << " ATA/ATAPI-4: " << stringifyBool(i.ata_data.atapi_4) << "\n";
+
+    }
+
     return o;
   }
 };
@@ -55,6 +94,8 @@ struct Volume {
 };
 
 auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
+  DeviceInfo info;
+
   STORAGE_DESCRIPTOR_HEADER header;
   if (!DeviceIoControl(driveHandle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &header, sizeof(header), nullptr, nullptr)) {
     std::cerr << "acquireDeviceInfo: " << driveHandle << " failed to acquire header :: " << GetLastError() << "\n";
@@ -69,7 +110,7 @@ auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
   }
 
   const STORAGE_DEVICE_DESCRIPTOR* descriptor = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(buffer.get());
-  DeviceInfo info;
+
   if (descriptor->VendorIdOffset != 0)
     info.vendor = trim(std::string(buffer.get() + descriptor->VendorIdOffset));
   if (descriptor->ProductIdOffset != 0)
@@ -82,39 +123,43 @@ auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
     info.bus_type = busTypes[descriptor->BusType];
   else info.bus_type = "(" + std::to_string(descriptor->BusType) + ")";
 
-  auto identitySize = 512;
-  auto identityBuffer = std::make_unique<unsigned char[]>(identitySize + sizeof(ATA_PASS_THROUGH_EX));
-  auto ataPass = reinterpret_cast<ATA_PASS_THROUGH_EX*>(identityBuffer.get());
-  ataPass->Length = sizeof(ataPass);
-  ataPass->TimeOutValue = 10;
-  ataPass->DataTransferLength = identitySize;
-  ataPass->DataBufferOffset = sizeof(ATA_PASS_THROUGH_EX);
+  if (info.bus_type == "SATA" || info.bus_type == "ATA" || info.bus_type == "ATAPI") {
 
-  auto ideRegs = reinterpret_cast<IDEREGS*>(ataPass->CurrentTaskFile);
-  ideRegs->bCommandReg = 0xec;
-  ideRegs->bSectorCountReg = 1;
+    auto identitySize = 512;
+    auto identityBuffer = std::make_unique<unsigned char[]>(identitySize + sizeof(ATA_PASS_THROUGH_EX));
+    auto ataPass = reinterpret_cast<ATA_PASS_THROUGH_EX*>(identityBuffer.get());
+    ataPass->TimeOutValue = 10;
+    ataPass->DataTransferLength = identitySize;
+    ataPass->DataBufferOffset = sizeof(ATA_PASS_THROUGH_EX);
+    ataPass->Length = sizeof(ATA_PASS_THROUGH_EX);
 
-  ataPass->AtaFlags = ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED;
+    auto ideRegs = reinterpret_cast<IDEREGS*>(ataPass->CurrentTaskFile);
+    ideRegs->bCommandReg = 0xec;
+    ideRegs->bSectorCountReg = 1;
 
-  if (!DeviceIoControl(driveHandle, IOCTL_ATA_PASS_THROUGH, ataPass, identitySize + sizeof(ATA_PASS_THROUGH_EX), ataPass, identitySize + sizeof(ATA_PASS_THROUGH_EX), nullptr, nullptr)) {
-    std::cerr << "acquireDeviceInfo: DeviceIoControl IOCTL_ATA_PASS_THROUGH (" << info.model << ") :: " << GetLastError() << "\n";
-    return std::optional<DeviceInfo>();
+    ataPass->AtaFlags = ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED;
+
+    if (!DeviceIoControl(driveHandle, IOCTL_ATA_PASS_THROUGH, ataPass, identitySize + sizeof(ATA_PASS_THROUGH_EX), ataPass, identitySize + sizeof(ATA_PASS_THROUGH_EX), nullptr, nullptr)) {
+      std::cerr << "acquireDeviceInfo: DeviceIoControl IOCTL_ATA_PASS_THROUGH (" << info.model << ") :: " << getErrorMessage(GetLastError()) << "\n";
+      return std::optional<DeviceInfo>();
+    }
+
+    info.is_info_filled = true;
+
+    auto* data = reinterpret_cast<WORD*>(identityBuffer.get() + sizeof(ATA_PASS_THROUGH_EX)); 
+    auto capabilitiesData = data[49];
+    capabilitiesData &= ~(0x0010); // 0000 0000 0001 0000
+    info.dma_suport = capabilitiesData != 0;
+
+    auto pioData = data[64];
+
+    for (auto i = 0; i < 8; i++) {
+      info.pio_support[i] = pioData & 1;
+      pioData >>= 1;
+    }
+
+    std::memcpy(&info.ata_data, &data[80], 2);
   }
-  
-  auto* data = reinterpret_cast<WORD*>(identityBuffer.get() + sizeof(ATA_PASS_THROUGH_EX));
-  uint16_t ataSupport = data[80];
-
-  struct {
-    uint8_t : 7;
-    uint8_t ata8_acs : 1;
-    uint8_t ata_atapi_7 : 1;
-    uint8_t ata_atapi_6 : 1;
-    uint8_t ata_atapi_5 : 1;
-    uint8_t ata_atapi_4 : 1;
-    uint8_t : 4;
-  } ataMask;
-  std::memcpy(&ataMask, &ataSupport, 2);
-  _asm nop;
   return std::optional(info);
 }
 
@@ -185,7 +230,7 @@ int main() {
               std::cout << "\t" << vol.busySpace << " / " << vol.totalSpace << " (" << vol.freeSpace << " free)\n";
               if (hasErrors)
                 std::cout << "\tErrors: \n";
-            } 
+            }
             if (hasErrors) {
               for (const auto& error : vol.errors) {
                 std::cout << "\t" << error << "\n";

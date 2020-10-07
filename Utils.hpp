@@ -1,6 +1,8 @@
 #ifndef __LAB_2_UTILS_HPP
 #define __LAB_2_UTILS_HPP
 
+#include <functional>
+
 struct SizeValue {
 private:
   static const std::array<std::string, 5> sizeSuffixes;
@@ -54,6 +56,17 @@ inline auto trim(const std::string& str) {
   }
   auto last = str.find_last_not_of(" \n\t");
   return str.substr(first, (last - first + 1));
+}
+
+template<typename T>
+inline auto all_of(const T* arr, size_t size, std::function<bool(T)> pred) {
+  bool flag = true;
+  for (auto i = 0; i < size; i++) flag = flag & pred(arr[i]);
+  return flag;
+}
+
+inline std::string stringifyBool(bool b) {
+  return (b ? "Yes" : "No");
 }
 
 const std::array<std::string,5> SizeValue::sizeSuffixes = {
