@@ -31,6 +31,9 @@ struct DeviceInfo {
   bool is_info_filled{ false };
   bool dma_suport{ false };
   bool pio_support[8];
+
+  int ultra_dma_mode_supported{ -1 };
+
   struct {
     uint8_t : 7;
 
@@ -59,6 +62,12 @@ struct DeviceInfo {
     if (i.is_info_filled) {
       std::cout << "\n";
       std::cout << std::setw(10) << "DMA Support: " << stringifyBool(i.dma_suport) << "\n";
+      std::cout << std::setw(10) << "Ultra DMA: ";
+      if (i.ultra_dma_mode_supported < 0) {
+        std::cout << "None\n";
+      } else {
+        std::cout << i.ultra_dma_mode_supported << " and below\n";
+      }
       std::cout << std::setw(10) << "PIO Support: ";
 
       if (!all_of<bool>(i.pio_support, 8, [](bool b) { return !b; })) {
@@ -76,7 +85,6 @@ struct DeviceInfo {
       std::cout << std::setw(14) << " ATA/ATAPI-6: " << stringifyBool(i.ata_data.atapi_6) << "\n";
       std::cout << std::setw(14) << " ATA/ATAPI-5: " << stringifyBool(i.ata_data.atapi_5) << "\n";
       std::cout << std::setw(14) << " ATA/ATAPI-4: " << stringifyBool(i.ata_data.atapi_4) << "\n";
-
     }
 
     return o;
@@ -159,6 +167,15 @@ auto acquireDeviceInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query) {
     }
 
     std::memcpy(&info.ata_data, &data[80], 2);
+
+    auto ultraDmaData = data[88];
+    auto dmaSupport = ultraDmaData & (0x007f); // 0000 0000 0111 1111
+
+    for (auto i = 0; i < 7; i++) {
+      if (dmaSupport & 1) {
+        info.ultra_dma_mode_supported = i;
+      }
+    }
   }
   return std::optional(info);
 }
