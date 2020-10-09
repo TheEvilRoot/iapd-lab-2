@@ -28,6 +28,7 @@ Offsets in that structure are provided by [this paper](http://www.t13.org/docume
 ### NVMe
 
 [WinAPI NVMe protocol commands](https://docs.microsoft.com/en-us/windows/win32/fileio/working-with-nvme-devices#protocol-specific-queries)
+[Structure](https://github.com/tpn/winsdk-10/blob/master/Include/10.0.16299.0/shared/nvme.h)
 
 ## Sample output
 
