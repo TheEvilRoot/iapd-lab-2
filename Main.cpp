@@ -15,11 +15,12 @@
 
 #define openDrive(path) CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr)
 
-std::array<std::string, 16> busTypes{
+std::array<std::string, 20> busTypes{
   "Unknown", "SCSI", "ATAPI", "ATA",
   "1394", "SSA", "Fibre", "USB",
   "RAID", "ISCSI", "SAS", "SATA",
-  "SD", "MMC", "Vitrual", "File backed virtual"
+  "SD", "MMC", "Vitrual", "File backed virtual",
+  "Spaces", "NVMe", "SCM", "UFS"
 };
 
 struct Volume {
