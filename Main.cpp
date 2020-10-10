@@ -31,6 +31,25 @@ struct Volume {
   SizeValue busySpace{0};
   std::vector<std::string> errors { };
   std::vector<std::string> ataSupport{ };
+
+  friend std::ostream& operator<<(std::ostream& o, const Volume& v) {
+    std::cout << "Volume " << v.letter << ":\n";
+
+    auto hasSize = v.totalSpace.bytes() != 0;
+    auto hasErrors = !v.errors.empty();
+
+    if (hasSize) {
+      std::cout << "\t" << v.busySpace << " / " << v.totalSpace << " (" << v.freeSpace << " free)\n";
+      if (hasErrors)
+        std::cout << "\tErrors: \n";
+    }
+    if (hasErrors) {
+      for (const auto& error : v.errors) {
+        std::cout << "\t" << error << "\n";
+      }
+    }
+    return o;
+  }
 };
 
 void acquireDeviceAtaInfo(HANDLE driveHandle, STORAGE_PROPERTY_QUERY& query, DeviceInfo& info) {
@@ -173,21 +192,7 @@ int main() {
 
         for (const auto vol : volumeIndex) {
           if (vol.deviceNumber == index) {
-            std::cout << "Volume " << vol.letter << ":\n";
-
-            auto hasSize = vol.totalSpace.bytes() != 0;
-            auto hasErrors = !vol.errors.empty();
-
-            if (hasSize) {
-              std::cout << "\t" << vol.busySpace << " / " << vol.totalSpace << " (" << vol.freeSpace << " free)\n";
-              if (hasErrors)
-                std::cout << "\tErrors: \n";
-            }
-            if (hasErrors) {
-              for (const auto& error : vol.errors) {
-                std::cout << "\t" << error << "\n";
-              }
-            }
+            std::cout << vol;
           }
         }
       }
